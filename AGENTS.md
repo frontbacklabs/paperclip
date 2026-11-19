@@ -253,7 +253,12 @@ delete the rule instead of carrying a parallel fork divergence.
    input. `enqueueWakeup` in `server/src/services/heartbeat/queue.ts` marks a
    wake user-initiated only when the requester authored the wake comment
    (`authorUserId` match, `authorType:"user"`, not deleted, not run-authored)
-   or carries a verified task-Retry receipt; `verifiedPersonWake` in
+   or carries a verified task-Retry receipt; the `pendingComments` adoption
+   gate in `enqueueWakeup` passes the same `userInitiated` flag so a parked
+   deferred interrupt wake still coalesces onto the admitted run — without
+   it the run's queued-comment interrupt authority cannot verify at claim
+   and every retry cancels with `queued_run_claim_rejected` (fork PR #3);
+   `verifiedPersonWake` in
    `server/src/modules/run-dispatch/adapters/postgres.ts` re-verifies the
    run's own wake receipt at dispatch so admission's relaxed read cannot
    produce runs dispatch cancels with `execution_reconciliation_required`.
