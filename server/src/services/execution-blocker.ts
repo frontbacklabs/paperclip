@@ -106,7 +106,11 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 }
 
 /** Resolved recovery bookkeeping can still carry an effective no-replay hold. */
-export function executionBlockerPredicate() {
+export function executionBlockerPredicate(opts: { includeResolvedReplayHolds?: boolean } = {}) {
+  const replayArm = opts.includeResolvedReplayHolds === false
+    ? inArray(issueRecoveryActions.status, ["active", "escalated"])
+    : or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
+      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`);
   return and(
     not(conversationRecoveryActionPredicate()!),
     not(preDispatchExecutionWaitRecoveryActionPredicate()),
@@ -123,8 +127,7 @@ export function executionBlockerPredicate() {
     ))`,
     or(unreconciledNativeExportPredicate(), and(
       inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-      or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+      replayArm,
     )),
   );
 }
@@ -224,7 +227,7 @@ export function restoreHoldReleasedForCurrentOwnerPredicate() {
   )}), false)`;
 }
 
-export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
+export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null; userInitiated?: boolean }): Promise<ExecutionBlocker | null> {
   const [conversation] = await db.select({ agentId: issues.conversationAgentId,
     boundaryId: issues.conversationBoundaryCommentId, status: issues.status,
     assigneeAgentId: issues.assigneeAgentId, statusVersion: issues.statusVersion,
@@ -264,7 +267,7 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
   const [action] = restoreHold ? [restoreHold] : await db.select().from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, companyId),
     eq(issueRecoveryActions.sourceIssueId, issueId),
-    executionBlockerPredicate(),
+    executionBlockerPredicate({ includeResolvedReplayHolds: !options?.userInitiated }),
     not(restoreHoldReleasedForCurrentOwnerPredicate()),
     boundary ? or(gt(issueRecoveryActions.createdAt, boundary.createdAt), nativeExecutionRecoveryActionPredicate()) : undefined,
   )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(1);
