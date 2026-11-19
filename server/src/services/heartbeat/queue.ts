@@ -4107,19 +4107,20 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "deferred" as const, admitted: true };
           };
           const explicitContinuationRunId = randomUUID();
-          const [resetComment] = isConversation(issue) && opts.requestedByActorType === "user" && opts.requestedByActorId && wakeCommentId
+          const [wakeComment] = opts.requestedByActorType === "user" && opts.requestedByActorId && wakeCommentId
             ? await tx.select({ body: issueComments.body }).from(issueComments).where(and(
                 eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
                 eq(issueComments.id, wakeCommentId), eq(issueComments.authorUserId, opts.requestedByActorId),
                 eq(issueComments.authorType, "user"), isNull(issueComments.deletedAt), isNull(issueComments.createdByRunId),
               )).limit(1)
             : [];
-          const verifiedConversationReset = Boolean(resetComment && isConversationReset(resetComment.body));
+          const verifiedConversationReset = Boolean(isConversation(issue) && wakeComment && isConversationReset(wakeComment.body));
           if (wakeCommentId && opts.requestedByActorType === "user")
             await preserveTaskRemoteWorkspaceWriter(tx as unknown as Db, issue.companyId, issue.id);
           const executionBlocker = await getExecutionBlocker(
             tx as unknown as Db, issue.companyId, issue.id,
-            { conversationResetCommentId: verifiedConversationReset ? wakeCommentId : null },
+            { conversationResetCommentId: verifiedConversationReset ? wakeCommentId : null,
+              userInitiated: Boolean(taskRetryActorId) || Boolean(wakeComment) },
           );
           // Prove eligibility without retiring the hold. Later gates can still
           // decline this wake; hold retirement and successor creation stay atomic.
