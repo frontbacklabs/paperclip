@@ -1374,17 +1374,17 @@ export function createPostgresIssueWakeAdmission(db: Db) {
           lockedIssue,
           lockIssue,
           recovery: {
-            async readBlocker({ commentId, requestedByActorType, requestedByActorId }) {
+            async readBlocker({ commentId, requestedByActorType, requestedByActorId, taskRetryRequestId }) {
               const issue = lockedIssue;
               const userComment = requestedByActorType === "user" ? commentId : null;
-              const [resetComment] = isConversation(issue) && userComment && requestedByActorId
+              const [wakeComment] = userComment && requestedByActorId
                 ? await tx.select({ body: issueComments.body }).from(issueComments).where(and(
                     eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
                     eq(issueComments.id, userComment), eq(issueComments.authorUserId, requestedByActorId),
                     eq(issueComments.authorType, "user"), isNull(issueComments.deletedAt), isNull(issueComments.createdByRunId),
                   )).limit(1)
                 : [];
-              const verifiedReset = Boolean(resetComment && isConversationReset(resetComment.body));
+              const verifiedReset = Boolean(isConversation(issue) && wakeComment && isConversationReset(wakeComment.body));
               const preserveWorkspace = userComment && issue?.executionWorkspaceId;
               if (preserveWorkspace) await preserveTaskRemoteWorkspaceWriter(tx as unknown as Db, companyId, issueId);
               if (!preserveWorkspace && issue?.conversationAgentId === null) {
@@ -1398,6 +1398,7 @@ export function createPostgresIssueWakeAdmission(db: Db) {
               const blocker = await getExecutionBlocker(tx as unknown as Db, companyId, issueId, {
                 conversationResetCommentId: verifiedReset ? userComment : null,
                 lockedIssue: preserveWorkspace ? undefined : issue ?? undefined,
+                userInitiated: Boolean(taskRetryRequestId) || Boolean(wakeComment),
               });
               return { blocker, verifiedReset };
             },
