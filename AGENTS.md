@@ -219,3 +219,62 @@ A change is done when all are true:
 3. Contracts are synced across db/shared/server/ui
 4. Docs updated when behavior or commands change. `doc/DEVELOPING.md` holds setup, commands, and everyday workflow only, and `doc/DATABASE.md` holds database setup and the rules for every schema change. Put a note about how a subsystem behaves in that subsystem's doc (see "More documentation" in `doc/DEVELOPING.md`), or leave it in the PR description when the code and tests already say it.
 5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
+
+## Fork-wins rules (upstream sync guardrails)
+
+This repo is the `frontbacklabs/paperclip` fork of `paperclipai/paperclip`,
+merged from upstream periodically. The rules below record deliberate fork
+divergences. **On every upstream merge and every review or edit touching these
+areas, preserve them — do not silently adopt upstream's version.** When
+upstream lands a feature that conflicts with a fork rule, gate or adapt the
+feature rather than dropping the rule.
+
+**Maintaining the rules:** whenever a change diverges the fork from upstream —
+a fork-only fix, a deliberately different implementation, or behavior upstream
+lacks — add or update a rule here in the same change. Name the symbols and
+files, state *why* the divergence exists and what silently taking upstream's
+version would break, and mark upstreamable divergences as candidates for
+upstreaming.
+
+Treat these entries as interim overrides, not permanent forks: keep the fork
+behavior only while upstream lacks an equivalent implementation. When upstream
+ships its own implementation for the same issue, take upstream's version and
+delete the rule instead of carrying a parallel fork divergence.
+
+1. **Deploy branches track upstream release tags, never upstream master.**
+   The running instance (`paperclip.ren.so`) deploys `v*` release builds, and
+   fork `master` tracks upstream master — thousands of unreleased commits ahead
+   of any deployed tag. Fork fixes ship by cherry-picking onto the deployed
+   tag on a branch named `deploy/<upstream-tag>-fork.N` (e.g.
+   `deploy/v2026.1106.0-fork.1`), building `--target production` for
+   `linux/amd64` with `PAPERCLIP_BUILD_COMMIT` set, pushing to ECR
+   `frontbacklabs/paperclip:<upstream-tag>-fork.N`, and bumping
+   `paperclip_image_tag` in `ren-infra` + `terraform apply`. Never build a
+   deploy image straight from `master`; upstream's own CI releases from tags,
+   and the gap between master and the deployed release is not ours to ship.
+2. **Resolved no-replay recovery holds do not fence verified person wakes.**
+   `executionBlockerPredicate({ includeResolvedReplayHolds })` in
+   `server/src/services/execution-blocker.ts` keeps `replay:"blocked"`
+   evidence authoritative only for automatic continuation; `getExecutionBlocker`'s
+   `userInitiated` option drops the resolved-residue arm for verified human
+   input. `enqueueWakeup` in `server/src/services/heartbeat/queue.ts` marks a
+   wake user-initiated only when the requester authored the wake comment
+   (`authorUserId` match, `authorType:"user"`, not deleted, not run-authored)
+   or carries a verified task-Retry receipt; `verifiedPersonWake` in
+   `server/src/modules/run-dispatch/adapters/postgres.ts` re-verifies the
+   run's own wake receipt at dispatch so admission's relaxed read cannot
+   produce runs dispatch cancels with `execution_reconciliation_required`.
+   Upstream matches resolved `replay:"blocked"` rows regardless of status and
+   fences every wake permanently (paperclipai/paperclip#14082, fork PR #2).
+   Taking upstream's versions reintroduces the permanent fence — and a
+   predicate-only port without the dispatch-gate verification reintroduces
+   admit-then-cancel. Candidate for upstreaming (upstream PR #22344); until
+   upstream lands an equivalent covering both gates, keep all three pieces
+   through merges.
+3. **Claude Haiku 5.5 in the claude-local model catalog.**
+   `claude-haiku-5-5` is a first-class `claude-local` model option: static
+   fallback catalog entry ordered with current releases, `2.1.293` minimum
+   CLI version, and capability/ordering/preflight/model-list coverage
+   (fork PR #1, commit `1fb215fca7`). Upstream shipped Haiku 5.5 only in the
+   OpenCode catalog. If upstream adds `claude-haiku-5-5` to the same catalog
+   entry points, take upstream's version and drop this rule.
