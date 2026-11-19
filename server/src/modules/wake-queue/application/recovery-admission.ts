@@ -8,6 +8,7 @@ type WakeRecoveryReadInput = {
   commentId: string | null;
   requestedByActorType?: string | null;
   requestedByActorId?: string | null;
+  taskRetryRequestId?: string | null;
 };
 type ExplicitContinuationIntent = { commentId: string | null; queuedCommentInterruptId?: string };
 
