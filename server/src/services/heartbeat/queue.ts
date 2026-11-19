@@ -3321,9 +3321,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "deferred" as const };
           };
           const explicitContinuationRunId = randomUUID();
+          const [wakeComment] = opts.requestedByActorType === "user" && opts.requestedByActorId && wakeCommentId
+            ? await tx.select({ body: issueComments.body }).from(issueComments).where(and(
+                eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
+                eq(issueComments.id, wakeCommentId), eq(issueComments.authorUserId, opts.requestedByActorId),
+                eq(issueComments.authorType, "user"), isNull(issueComments.deletedAt), isNull(issueComments.createdByRunId),
+              )).limit(1)
+            : [];
           const executionBlocker = await getExecutionBlocker(
             tx as unknown as Db, issue.companyId, issue.id,
-            { conversationResetCommentId: opts.requestedByActorType === "user" ? wakeCommentId : null },
+            { conversationResetCommentId: wakeComment ? wakeCommentId : null,
+              userInitiated: Boolean(taskRetryActorId) || Boolean(wakeComment) },
           );
           // Prove eligibility without retiring the hold. Later gates can still
           // decline this wake; hold retirement and successor creation stay atomic.

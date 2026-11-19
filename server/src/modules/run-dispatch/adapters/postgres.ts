@@ -1,8 +1,10 @@
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
+import { readTaskRetryIntent } from "../../../services/task-retry.js";
+import { queuedCommentIdsFromRunContext } from "../../../services/issue-queued-comment-queue.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
-import { and, asc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -1008,6 +1010,34 @@ export function createPostgresRunDispatchAdapter(
       };
   }
 
+  async function verifiedPersonWake(tx: Db, run: HeartbeatRun, issueId: string,
+    contextSnapshot: Record<string, unknown>): Promise<boolean> {
+    if (!run.wakeupRequestId) return false;
+    const [wake] = await tx.select({
+      requestedByActorType: agentWakeupRequests.requestedByActorType,
+      requestedByActorId: agentWakeupRequests.requestedByActorId,
+      payload: agentWakeupRequests.payload,
+    }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, run.companyId),
+      eq(agentWakeupRequests.agentId, run.agentId),
+      eq(agentWakeupRequests.id, run.wakeupRequestId),
+      eq(agentWakeupRequests.runId, run.id),
+    )).limit(1);
+    if (wake?.requestedByActorType !== "user" || !wake.requestedByActorId) return false;
+    const retry = readTaskRetryIntent(wake.payload);
+    if (retry && retry.generationId === run.wakeupRequestId && retry.actorId === wake.requestedByActorId
+        && !retry.canonicalIntentId) return true;
+    const commentIds = [...new Set([deriveCommentId(contextSnapshot), ...queuedCommentIdsFromRunContext(contextSnapshot)]
+      .filter((id): id is string => typeof id === "string" && id.length > 0))];
+    if (!commentIds.length) return false;
+    const [authored] = await tx.select({ id: issueComments.id }).from(issueComments).where(and(
+      eq(issueComments.companyId, run.companyId), eq(issueComments.issueId, issueId),
+      inArray(issueComments.id, commentIds), eq(issueComments.authorUserId, wake.requestedByActorId),
+      eq(issueComments.authorType, "user"), isNull(issueComments.deletedAt), isNull(issueComments.createdByRunId),
+    )).limit(1);
+    return Boolean(authored);
+  }
+
   async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date, publications?: ActivityPublication[]) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
@@ -1029,7 +1059,10 @@ export function createPostgresRunDispatchAdapter(
         } };
       }
     }
-    const recovery = await getExecutionBlocker(tx, run.companyId, issueId, { conversationResetCommentId: deriveCommentId(contextSnapshot) });
+    const recovery = await getExecutionBlocker(tx, run.companyId, issueId, {
+      conversationResetCommentId: deriveCommentId(contextSnapshot),
+      userInitiated: await verifiedPersonWake(tx, run, issueId, contextSnapshot),
+    });
     if (recovery) return { issueId, facts: null, executionBlocker: recovery, decision: { stale: true as const,
       errorCode: "execution_reconciliation_required" as const, reason: recovery.nextAction,
       details: { issueId, recoveryActionId: recovery.recoveryActionId },
