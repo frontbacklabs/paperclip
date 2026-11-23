@@ -1239,27 +1239,49 @@ export function createPostgresRunDispatchAdapter(
 
   async function verifiedPersonWake(tx: Db, run: HeartbeatRun, issueId: string,
     contextSnapshot: Record<string, unknown>): Promise<boolean> {
-    if (!run.wakeupRequestId) return false;
-    const [wake] = await tx.select({
+    const selectWake = () => tx.select({
+      id: agentWakeupRequests.id,
       requestedByActorType: agentWakeupRequests.requestedByActorType,
       requestedByActorId: agentWakeupRequests.requestedByActorId,
       payload: agentWakeupRequests.payload,
-    }).from(agentWakeupRequests).where(and(
+    }).from(agentWakeupRequests);
+    const [dispatchWake] = run.wakeupRequestId ? await selectWake().where(and(
       eq(agentWakeupRequests.companyId, run.companyId),
       eq(agentWakeupRequests.agentId, run.agentId),
       eq(agentWakeupRequests.id, run.wakeupRequestId),
       eq(agentWakeupRequests.runId, run.id),
-    )).limit(1);
-    if (wake?.requestedByActorType !== "user" || !wake.requestedByActorId) return false;
-    const retry = readTaskRetryIntent(wake.payload);
-    if (retry && retry.generationId === run.wakeupRequestId && retry.actorId === wake.requestedByActorId
-        && !retry.canonicalIntentId) return true;
+    )).limit(1) : [];
+    // A deferred person Retry resumes through a fresh receipt wake whose own
+    // payload stays minimal; its signed intent remains on the wake recorded as
+    // contextSnapshot.taskRetryRequestId (resumeTaskRetry).
+    const retryReceiptId = readNonEmptyString(contextSnapshot.taskRetryRequestId);
+    const [retryReceipt] = retryReceiptId && isUuidLike(retryReceiptId) && retryReceiptId !== run.wakeupRequestId
+      ? await selectWake().where(and(
+          eq(agentWakeupRequests.companyId, run.companyId),
+          eq(agentWakeupRequests.agentId, run.agentId),
+          eq(agentWakeupRequests.id, retryReceiptId),
+          eq(agentWakeupRequests.reason, "task_retry"),
+          eq(agentWakeupRequests.requestedByActorType, "user"),
+          eq(agentWakeupRequests.status, "coalesced"),
+          eq(agentWakeupRequests.runId, run.id),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+        )).limit(1)
+      : [];
+    for (const wake of [dispatchWake, retryReceipt]) {
+      if (!wake || wake.requestedByActorType !== "user" || !wake.requestedByActorId) continue;
+      const retry = readTaskRetryIntent(wake.payload);
+      if (retry && retry.generationId === wake.id && retry.actorId === wake.requestedByActorId
+          && !retry.canonicalIntentId && !retry.queuedChatRequestId) return true;
+    }
+    const actorId = [dispatchWake, retryReceipt]
+      .find(wake => wake?.requestedByActorType === "user" && wake.requestedByActorId)?.requestedByActorId;
+    if (!actorId) return false;
     const commentIds = [...new Set([deriveCommentId(contextSnapshot), ...queuedCommentIdsFromRunContext(contextSnapshot)]
       .filter((id): id is string => typeof id === "string" && id.length > 0))];
     if (!commentIds.length) return false;
     const [authored] = await tx.select({ id: issueComments.id }).from(issueComments).where(and(
       eq(issueComments.companyId, run.companyId), eq(issueComments.issueId, issueId),
-      inArray(issueComments.id, commentIds), eq(issueComments.authorUserId, wake.requestedByActorId),
+      inArray(issueComments.id, commentIds), eq(issueComments.authorUserId, actorId),
       eq(issueComments.authorType, "user"), isNull(issueComments.deletedAt), isNull(issueComments.createdByRunId),
     )).limit(1);
     return Boolean(authored);
