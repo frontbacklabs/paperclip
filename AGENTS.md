@@ -264,6 +264,11 @@ delete the rule instead of carrying a parallel fork divergence.
    `server/src/modules/run-dispatch/adapters/postgres.ts` re-verifies the
    run's own wake receipt at dispatch so admission's relaxed read cannot
    produce runs dispatch cancels with `execution_reconciliation_required`.
+   A deferred person Retry resumed by `resumeTaskRetry` dispatches through a
+   fresh receipt wake whose payload stays minimal, so `verifiedPersonWake`
+   also verifies the coalesced `task_retry` wake recorded as
+   `contextSnapshot.taskRetryRequestId`; dropping that second lookup
+   re-cancels every resumed Retry behind a resolved hold.
    Upstream matches resolved `replay:"blocked"` rows regardless of status and
    fences every wake permanently (paperclipai/paperclip#14082, fork PR #2).
    Taking upstream's versions reintroduces the permanent fence — and a
