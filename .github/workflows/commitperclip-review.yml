@@ -14,6 +14,9 @@ permissions:
 
 jobs:
   review:
+    # This workflow powers upstream's commitperclip review bot; the fork has
+    # no COMMITPERCLIP_KEY secret, so skip it here entirely.
+    if: github.repository == 'paperclipai/paperclip'
     # Community PR CI shares the GitHub-hosted queue. A CODEOWNER's own PR is
     # reviewed from the reserved AWS metadata fleet so it never waits there.
     # Same admission as ci-routing.yml; every other PR stays GitHub-hosted.
