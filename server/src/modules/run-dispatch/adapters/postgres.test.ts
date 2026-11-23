@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   approvals,
   budgetIncidents,
@@ -1625,6 +1626,36 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({ recoveryActionId: action!.id });
     const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
     expect(retained.evidence.automaticRecovery).toMatchObject({ replay: "blocked", actionOutcome: "unknown" });
+  });
+
+  it("verifies a resumed person Retry through its receipt wake behind a resolved no-replay hold", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID(), sourceRunId = randomUUID(), runId = randomUUID();
+    const receiptWakeId = randomUUID(), dispatchWakeId = randomUUID();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(agentWakeupRequests).values([
+      { id: receiptWakeId, companyId, agentId, source: "on_demand", reason: "task_retry",
+        status: "coalesced", runId, requestedByActorType: "user", requestedByActorId: "board-user",
+        payload: { issueId, taskRetry: { schema: "paperclip.task-retry.v1", generationId: receiptWakeId,
+          sourceRunId, actorId: "board-user", actorSource: "session", strategy: "evaluate" } } },
+      { id: dispatchWakeId, companyId, agentId, source: "on_demand", reason: "task_retry",
+        status: "skipped", runId, requestedByActorType: "user", requestedByActorId: "board-user",
+        payload: { issueId } },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      { id: sourceRunId, companyId, agentId, status: "cancelled", errorCode: "operator_interrupted",
+        finishedAt: new Date(), contextSnapshot: { issueId } },
+      { id: runId, companyId, agentId, status: "queued", wakeupRequestId: dispatchWakeId,
+        contextSnapshot: { issueId, wakeReason: "task_retry", taskRetryRequestId: receiptWakeId } },
+    ]);
+    await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId,
+      kind: "active_run_watchdog", ownerType: "board", cause: "uncertain_external_action", status: "resolved",
+      evidence: { automaticRecovery: { replay: "blocked" } }, fingerprint: sourceRunId,
+      nextAction: "Verify the external action before continuing." });
+    expect(await getExecutionBlocker(db, companyId, issueId)).not.toBeNull();
+    const adapter = createPostgresRunDispatchAdapter(db);
+    await expect(adapter.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now: new Date() }))
+      .resolves.toMatchObject({ outcome: "not_stale" });
   });
 
   it("links the stopped run's agent instead of its return owner, within the same company", async () => {
