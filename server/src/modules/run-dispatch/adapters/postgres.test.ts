@@ -22,6 +22,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueApprovals,
+  issueComments,
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
@@ -1574,6 +1575,74 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     expect(await getExecutionBlocker(db, randomUUID(), issueId)).toBeNull();
     const adapter = createPostgresRunDispatchAdapter(db);
     await expect(adapter.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now: new Date() })).resolves.toMatchObject({ outcome: "cancelled", errorCode: "execution_reconciliation_required" });
+  });
+
+  it("defers a queued user comment when the blocking preservation action's evidence has no runId", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID(), sourceRunId = randomUUID(), wakeId = randomUUID(), runId = randomUUID();
+    const commentId = randomUUID();
+    const now = new Date();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId,
+      status: "cancelled", runtimeMode: "native", nativeIssueId: issueId,
+      finishedAt: new Date(now.getTime() - 60_000), contextSnapshot: { issueId } });
+    await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId,
+      kind: "active_run_watchdog", ownerType: "board", cause: "uncertain_external_action", status: "active",
+      evidence: {}, fingerprint: randomUUID(), nextAction: "Verify the external action before continuing." });
+    await db.insert(issueComments).values({ id: commentId, companyId, issueId,
+      authorType: "user", authorUserId: "board-user", body: "Please continue.", createdAt: now, updatedAt: now });
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId, agentId,
+      source: "issue_comment", reason: "issue_commented", status: "queued", runId,
+      requestedByActorType: "user", requestedByActorId: "board-user",
+      payload: { issueId, commentId } });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "queued",
+      runtimeMode: "legacy", wakeupRequestId: wakeId,
+      contextSnapshot: { issueId, wakeReason: "issue_commented", wakeCommentId: commentId,
+        wakeCommentIds: [commentId], commentId } });
+
+    const adapter = createPostgresRunDispatchAdapter(db);
+    await expect(adapter.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now }))
+      .resolves.toMatchObject({ outcome: "cancelled", errorCode: "execution_reconciliation_required" });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0])
+      .toMatchObject({ status: "cancelled", errorCode: "execution_reconciliation_required" });
+  });
+
+  it("bounds a queued user comment by the most recently finished matching run when evidence has no runId", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID(), olderRunId = randomUUID(), newerRunId = randomUUID(), wakeId = randomUUID(), runId = randomUUID();
+    const commentId = randomUUID();
+    const now = new Date();
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values([
+      { id: olderRunId, companyId, agentId, status: "cancelled", runtimeMode: "native", nativeIssueId: issueId,
+        finishedAt: new Date(now.getTime() - 10_800_000), contextSnapshot: { issueId } },
+      { id: newerRunId, companyId, agentId, status: "cancelled", runtimeMode: "native", nativeIssueId: issueId,
+        finishedAt: new Date(now.getTime() - 3_600_000), contextSnapshot: { issueId } },
+    ]);
+    await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId,
+      kind: "active_run_watchdog", ownerType: "board", cause: "uncertain_external_action", status: "active",
+      evidence: {}, fingerprint: randomUUID(), nextAction: "Verify the external action before continuing." });
+    await db.insert(issueComments).values({ id: commentId, companyId, issueId,
+      authorType: "user", authorUserId: "board-user", body: "Please continue.",
+      createdAt: new Date(now.getTime() - 5_400_000), updatedAt: new Date(now.getTime() - 5_400_000) });
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId, agentId,
+      source: "issue_comment", reason: "issue_commented", status: "queued", runId,
+      requestedByActorType: "user", requestedByActorId: "board-user",
+      payload: { issueId, commentId } });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "queued",
+      runtimeMode: "legacy", wakeupRequestId: wakeId,
+      contextSnapshot: { issueId, wakeReason: "issue_commented", wakeCommentId: commentId,
+        wakeCommentIds: [commentId], commentId } });
+
+    const adapter = createPostgresRunDispatchAdapter(db);
+    await expect(adapter.cancelStaleQueuedRun({ companyId, runId, expectedStatus: "queued", now }))
+      .resolves.toMatchObject({ outcome: "cancelled", errorCode: "execution_reconciliation_required" });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake).toMatchObject({ status: "skipped" });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0])
+      .toMatchObject({ status: "cancelled", errorCode: "execution_reconciliation_required" });
   });
 
   it.each(["active", "resolved"])("allows a new message through a historical %s interruption hold", async status => {
