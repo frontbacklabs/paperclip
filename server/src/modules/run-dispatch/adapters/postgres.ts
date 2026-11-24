@@ -19,7 +19,7 @@ import { readTaskRetryIntent } from "../../../services/task-retry.js";
 import { continueFreshInTransaction, recordFreshContinuationCheck } from "../../../services/fresh-continuation-fallback.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
-import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -1088,8 +1088,6 @@ export function createPostgresRunDispatchAdapter(
       eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
       sql`${issueRecoveryActions.id}::text = ${wait.recoveryActionId}`,
     )).for("update");
-    // Evidence is free-form: a preservation action can carry no run id at all.
-    // Skip the run-scoped arm then instead of interpolating an empty predicate.
     const preservationEvidence = preservation ? parseObject(preservation.evidence) : {};
     const preservationRunId = readNonEmptyString(preservationEvidence.runId)
       ?? readNonEmptyString(preservationEvidence.sourceRunId);
@@ -1097,7 +1095,7 @@ export function createPostgresRunDispatchAdapter(
       eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
       eq(heartbeatRuns.nativeIssueId, issueId), eq(heartbeatRuns.runtimeMode, "native"), inArray(heartbeatRuns.status, ["cancelled", "failed"]),
       preservationRunId ? sql`${heartbeatRuns.id}::text = ${preservationRunId}` : undefined,
-    )) : [];
+    )).orderBy(sql`${heartbeatRuns.finishedAt} desc nulls last`, desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1) : [];
     // A user-stopped run can settle as failed when its unreachable runner's
     // transport fails closed. Only that recorded Stop makes a failed source eligible.
     if (!preservation || !source || (source.status === "failed" && !recordedUserStop(source))) return null;

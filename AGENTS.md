@@ -291,8 +291,12 @@ delete the rule instead of carrying a parallel fork divergence.
    readNonEmptyString(evidence.sourceRunId)` and passes `undefined` to `and()`
    when neither key holds a non-empty string, so the arm is skipped instead
    of interpolating `id::text = ` with an empty parameter (a `= )` syntax
-   error that aborted the whole cancel transaction). `evidence` is free-form
-   JSONB defaulting to `{}`, so a preservation action can legitimately carry
-   no run id. Upstream master still interpolates `evidence.runId` unguarded.
+   error that aborted the whole cancel transaction). With the arm skipped the
+   candidate scan can match several stopped native runs, so it orders by
+   `finished_at desc nulls last` and takes the most recently finished one —
+   the active hold tracks the latest interruption and its stop boundary is
+   the strictest. `evidence` is free-form JSONB defaulting to `{}`, so a
+   preservation action can legitimately carry no run id. Upstream master
+   still interpolates `evidence.runId` unguarded.
    Candidate for upstreaming; if upstream ships an equivalent guard, take
    upstream's version and drop this rule.
