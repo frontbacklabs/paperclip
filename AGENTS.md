@@ -283,3 +283,16 @@ delete the rule instead of carrying a parallel fork divergence.
    (fork PR #1, commit `1fb215fca7`). Upstream shipped Haiku 5.5 only in the
    OpenCode catalog. If upstream adds `claude-haiku-5-5` to the same catalog
    entry points, take upstream's version and drop this rule.
+4. **RunId-less preservation evidence cannot crash the stale-queued-run cancel.**
+   `deferUnstartedUserComment` in
+   `server/src/modules/run-dispatch/adapters/postgres.ts` resolves the
+   run-scoped `heartbeatRuns` arm from `issueRecoveryActions.evidence`
+   through `readNonEmptyString(evidence.runId) ??
+   readNonEmptyString(evidence.sourceRunId)` and passes `undefined` to `and()`
+   when neither key holds a non-empty string, so the arm is skipped instead
+   of interpolating `id::text = ` with an empty parameter (a `= )` syntax
+   error that aborted the whole cancel transaction). `evidence` is free-form
+   JSONB defaulting to `{}`, so a preservation action can legitimately carry
+   no run id. Upstream master still interpolates `evidence.runId` unguarded.
+   Candidate for upstreaming; if upstream ships an equivalent guard, take
+   upstream's version and drop this rule.
